@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.astro/
+
+# Environment files (keep credentials out of git)
+config.env
+deploy/config.env
+.env
+.env.local
+.env.*.local
+
+# Deploy logs
+deploy/logs/
+
+# Data files (fetched/generated, not source-controlled)
+# Ignore all files in public/data except countries.geojson (static asset)
+public/data/*
+!public/data/countries.geojson
+data/cache/
+data/output/
+
+# GeoIP database (must be downloaded separately)
+data/geoip/*.mmdb
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Cloudflare Wrangler
+.wrangler/
+wrangler.toml

@@ -1,0 +1,701 @@
+/**
+ * Particle Render Worker
+ * Renders traffic flow visualization with bandwidth-proportional routes.
+ * - Line thickness, particle count, speed, and size all scale with bandwidth rank
+ * - Uses OffscreenCanvas for GPU rendering on separate thread
+ */
+export { };
+
+// --- Types ---
+interface ViewState {
+  longitude: number;
+  latitude: number;
+  zoom: number;
+  width: number;
+  height: number;
+  bearing?: number;
+  pitch?: number;
+}
+
+interface WorkerMessage {
+  type: 'init' | 'updateNodes' | 'updateViewState' | 'resize' | 'updateSettings';
+  canvas?: OffscreenCanvas;
+  nodes?: { lng: number; lat: number; isHSDir: boolean; selectionWeight?: number }[];
+  viewState?: ViewState;
+  width?: number;
+  height?: number;
+  pixelRatio?: number;
+  density?: number;
+  opacity?: number;
+  speed?: number;
+  trafficType?: 'all' | 'hidden' | 'general';
+  pathMode?: 'city' | 'country';
+  countryCentroids?: Record<string, [number, number]>;
+  hiddenServiceProbability?: number;
+  // TorFlow-inspired settings
+  pathWidth?: number;
+  particleCount?: number;
+  scaleByZoom?: boolean;
+  scaleByBandwidth?: boolean;
+  particleSize?: number;
+}
+
+interface Route {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  srcIdx: number;  // Index into nodes array
+  tgtIdx: number;  // Index into nodes array
+  isHidden: boolean;
+  bandwidthScore: number;
+  bandwidthRank: number; // 0 = top, 1 = lowest
+}
+
+// --- Constants ---
+const MAX_ROUTES = 3000;
+const TILE_SIZE = 512;
+const PI = Math.PI;
+const DEG_TO_RAD = PI / 180;
+const BASE_LINE_OFFSET = 0.005; // Base perpendicular offset for visual lanes
+
+// Bandwidth rank thresholds: [threshold, lineCount, particleCount]
+const RANK_TIERS = [
+  [0.01, 5, 6], // Top 1%
+  [0.05, 4, 5], // Top 5%
+  [0.10, 3, 4], // Top 10%
+  [0.25, 2, 3], // Top 25%
+  [0.50, 1, 2], // Top 50%
+  [1.00, 1, 1], // Rest
+] as const;
+
+// --- State ---
+let canvas: OffscreenCanvas | null = null;
+let gl: WebGL2RenderingContext | null = null;
+let lineProgram: WebGLProgram | null = null;
+let particleProgram: WebGLProgram | null = null;
+let lineVAO: WebGLVertexArrayObject | null = null;
+let particleVAO: WebGLVertexArrayObject | null = null;
+
+// Cached uniform locations (performance optimization)
+let lineUniforms: Record<string, WebGLUniformLocation | null> = {};
+let particleUniforms: Record<string, WebGLUniformLocation | null> = {};
+
+let nodes: { x: number; y: number; isHSDir: boolean; bandwidth: number }[] = [];
+let allRoutes: Route[] = [];
+let routes: Route[] = [];
+let lineVertexCount = 0;
+let particleCount = 0;
+
+let currentDensity = 1.0;
+let currentOpacity = 1.0;
+let currentSpeedFactor = 1.0;
+let currentTrafficType = 'all';
+let currentPathMode: 'city' | 'country' = 'city';
+let currentViewState: ViewState = { longitude: 0, latitude: 0, zoom: 1, width: 800, height: 600 };
+// Hidden service traffic probability (~3-6% of Tor traffic based on research)
+let currentHiddenProbability = 0.04;
+// TorFlow-inspired settings
+let currentPathWidth = 0.5; // Multiplier for line offset (0.1-1.0)
+let currentParticleCountFactor = 0.5; // Multiplier for particle count (0.1-1.0)
+let currentScaleByZoom = true; // Scale particle size by zoom
+let currentScaleByBandwidth = true; // Scale particle count by bandwidth
+let currentParticleSize = 0.5; // Multiplier for particle size
+let devicePixelRatio = 1;
+let startTime = 0;
+
+// Country centroids for country mode (lng, lat)
+let countryCentroids: Record<string, [number, number]> = {};
+
+// Raw nodes before aggregation (for switching modes without re-fetching)
+let rawNodes: { lng: number; lat: number; isHSDir: boolean; bandwidth: number }[] = [];
+
+// Maps aggregated node index to original rawNodes indices (country mode only, null in city mode)
+let aggregatedToRawIndices: number[][] | null = null;
+
+// --- Shaders ---
+const LINE_VS = `#version 300 es
+in vec2 a_start, a_end;
+in float a_type, a_t1, a_t2, a_offsetFactor;
+uniform float u_scale, u_pathWidth;
+uniform vec2 u_center, u_screenSize;
+out float v_type;
+
+void main() {
+  vec2 diff = a_end - a_start;
+  float dist = length(diff);
+  
+  // Choose which end of the segment we are at
+  // gl_VertexID is 0 for even, 1 for odd (since we use drawArrays(LINES))
+  float t = mix(a_t1, a_t2, float(gl_VertexID % 2));
+  vec2 pos = mix(a_start, a_end, t);
+  
+  // Apply perpendicular offset scaled by distance and curved via sin()
+  // This makes paths converge at the exact relay points (sin(0)=0, sin(PI)=0)
+  if (dist > 0.0) {
+    vec2 dir = diff / dist;
+    vec2 perp = vec2(-dir.y, dir.x);
+    // Using 0.15 multiplier for a more pronounced "bloom"
+    float curve = sin(t * 3.14159265);
+    pos += perp * a_offsetFactor * u_pathWidth * dist * 0.15 * curve;
+  }
+  
+  vec2 p = (pos - u_center) * u_scale;
+  gl_Position = vec4(p.x / (u_screenSize.x * 0.5), -p.y / (u_screenSize.y * 0.5), 0.0, 1.0);
+  v_type = a_type;
+}`;
+
+const LINE_FS = `#version 300 es
+precision mediump float;
+uniform float u_opacity;
+uniform int u_trafficType;
+in float v_type;
+out vec4 fragColor;
+void main() {
+  if (u_trafficType == 1 && v_type > 0.5) discard;
+  if (u_trafficType == 2 && v_type < 0.5) discard;
+  vec3 color = v_type < 0.5 ? vec3(0.0, 0.71, 1.0) : vec3(1.0, 0.4, 0.0);
+  float a = u_opacity * 0.35;
+  fragColor = vec4(color * a, a);
+}`;
+
+const PARTICLE_VS = `#version 300 es
+in vec2 a_start, a_end;
+in float a_speed, a_timeOffset, a_type, a_bandwidthRank, a_offsetDir;
+uniform float u_time, u_scale, u_speedFactor, u_scaleByZoom, u_particleSize, u_pathWidth;
+uniform vec2 u_center, u_screenSize;
+out float v_type, v_progress;
+
+void main() {
+  vec2 diff = a_end - a_start;
+  float dist = length(diff);
+  
+  float speedMult = 1.0 + (1.0 - a_bandwidthRank) * 2.0;
+  float t = fract(u_time * a_speed * u_speedFactor * speedMult + a_timeOffset);
+  float st = t * t * (3.0 - 2.0 * t); // Smooth easing
+  
+  vec2 pos = mix(a_start, a_end, st);
+  
+  // Calculate perpendicular offset for real-time spread scaled by distance and curved
+  if (dist > 0.0) {
+    vec2 dir = diff / dist;
+    vec2 perp = vec2(-dir.y, dir.x);
+    // Consistent with static lines spread
+    float curve = sin(st * 3.14159265);
+    pos += perp * a_offsetDir * u_pathWidth * dist * 0.15 * curve;
+  }
+  
+  vec2 p = (pos - u_center) * u_scale;
+  gl_Position = vec4(p.x / (u_screenSize.x * 0.5), -p.y / (u_screenSize.y * 0.5), 0.0, 1.0);
+  // Scale particle size by zoom when enabled, otherwise use fixed size
+  float baseSize = (2.0 + (1.0 - a_bandwidthRank) * 4.0) * u_particleSize * 2.0;
+  float zoomScale = u_scaleByZoom > 0.5 ? max(1.0, u_scale * 0.1) : 1.0;
+  gl_PointSize = baseSize * zoomScale;
+  v_type = a_type;
+  v_progress = t;
+}`;
+
+const PARTICLE_FS = `#version 300 es
+precision mediump float;
+uniform float u_opacity;
+uniform int u_trafficType;
+in float v_type, v_progress;
+out vec4 fragColor;
+void main() {
+  if (u_trafficType == 1 && v_type > 0.5) discard;
+  if (u_trafficType == 2 && v_type < 0.5) discard;
+  vec3 color = v_type < 0.5 ? vec3(0.0, 0.71, 1.0) : vec3(1.0, 0.4, 0.0);
+  float fade = smoothstep(0.0, 0.1, v_progress) * smoothstep(1.0, 0.9, v_progress);
+  vec2 c = 2.0 * gl_PointCoord - 1.0;
+  float soft = 1.0 - smoothstep(0.3, 1.0, dot(c, c));
+  float a = u_opacity * 2.5 * fade * soft;
+  fragColor = vec4(color * a, a);
+}`;
+
+// --- Helpers ---
+function projectToWorld(lng: number, lat: number): [number, number] {
+  const x = (TILE_SIZE / (2 * PI)) * (lng * DEG_TO_RAD + PI);
+  const y = (TILE_SIZE / (2 * PI)) * (PI - Math.log(Math.tan(PI / 4 + lat * DEG_TO_RAD * 0.5)));
+  return [x, y];
+}
+
+function getTierForRank(rank: number): [number, number] {
+  for (const [threshold, lines, particles] of RANK_TIERS) {
+    if (rank < threshold) return [lines, particles];
+  }
+  return [1, 1];
+}
+
+// Find nearest country centroid for a given lng/lat
+function findNearestCountry(lng: number, lat: number): string | null {
+  let minDist = Infinity;
+  let nearest: string | null = null;
+  for (const [code, [cLng, cLat]] of Object.entries(countryCentroids)) {
+    const dx = lng - cLng, dy = lat - cLat;
+    const dist = dx * dx + dy * dy;
+    if (dist < minDist) {
+      minDist = dist;
+      nearest = code;
+    }
+  }
+  return nearest;
+}
+
+// Aggregate nodes by country centroid
+function aggregateNodesByCountry(): typeof nodes {
+  if (!Object.keys(countryCentroids).length) {
+    aggregatedToRawIndices = null;
+    return rawNodes.map(n => {
+      const [x, y] = projectToWorld(n.lng, n.lat);
+      return { x, y, isHSDir: n.isHSDir, bandwidth: n.bandwidth };
+    });
+  }
+
+  // Group nodes by nearest country, tracking original indices
+  const groups: Record<string, { bandwidth: number; isHSDir: boolean; rawIndices: number[] }> = {};
+  for (let i = 0; i < rawNodes.length; i++) {
+    const n = rawNodes[i];
+    const code = findNearestCountry(n.lng, n.lat);
+    if (!code) continue;
+    const g = groups[code] ||= { bandwidth: 0, isHSDir: false, rawIndices: [] };
+    g.bandwidth += n.bandwidth;
+    g.isHSDir ||= n.isHSDir;
+    g.rawIndices.push(i);
+  }
+
+  // Convert to node array using country centroids
+  const aggregated: typeof nodes = [];
+  aggregatedToRawIndices = [];
+  for (const [code, g] of Object.entries(groups)) {
+    const c = countryCentroids[code];
+    if (!c) continue;
+    const [x, y] = projectToWorld(c[0], c[1]);
+    aggregated.push({ x, y, isHSDir: g.isHSDir, bandwidth: g.bandwidth / g.rawIndices.length });
+    aggregatedToRawIndices.push(g.rawIndices);
+  }
+
+  console.log(`[ParticleWorker] Aggregated ${rawNodes.length} nodes into ${aggregated.length} countries`);
+  return aggregated;
+}
+
+function createShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader | null {
+  const shader = gl.createShader(type);
+  if (!shader) return null;
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+    return null;
+  }
+  return shader;
+}
+
+function createProgram(gl: WebGL2RenderingContext, vs: WebGLShader, fs: WebGLShader): WebGLProgram | null {
+  const program = gl.createProgram();
+  if (!program) return null;
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(program));
+    return null;
+  }
+  return program;
+}
+
+// --- WebGL Init ---
+function initWebGL() {
+  if (!canvas) return;
+  gl = canvas.getContext('webgl2', {
+    alpha: true, antialias: true, depth: false,
+    powerPreference: 'high-performance', premultipliedAlpha: true
+  }) as WebGL2RenderingContext;
+  if (!gl) return;
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+  const lineVs = createShader(gl, gl.VERTEX_SHADER, LINE_VS);
+  const lineFs = createShader(gl, gl.FRAGMENT_SHADER, LINE_FS);
+  if (lineVs && lineFs) {
+    lineProgram = createProgram(gl, lineVs, lineFs);
+    lineVAO = gl.createVertexArray();
+    if (lineProgram) {
+      lineUniforms = {
+        u_scale: gl.getUniformLocation(lineProgram, 'u_scale'),
+        u_center: gl.getUniformLocation(lineProgram, 'u_center'),
+        u_screenSize: gl.getUniformLocation(lineProgram, 'u_screenSize'),
+        u_opacity: gl.getUniformLocation(lineProgram, 'u_opacity'),
+        u_trafficType: gl.getUniformLocation(lineProgram, 'u_trafficType'),
+        u_pathWidth: gl.getUniformLocation(lineProgram, 'u_pathWidth'),
+      };
+    }
+  }
+
+  const particleVs = createShader(gl, gl.VERTEX_SHADER, PARTICLE_VS);
+  const particleFs = createShader(gl, gl.FRAGMENT_SHADER, PARTICLE_FS);
+  if (particleVs && particleFs) {
+    particleProgram = createProgram(gl, particleVs, particleFs);
+    particleVAO = gl.createVertexArray();
+    if (particleProgram) {
+      particleUniforms = {
+        u_time: gl.getUniformLocation(particleProgram, 'u_time'),
+        u_scale: gl.getUniformLocation(particleProgram, 'u_scale'),
+        u_center: gl.getUniformLocation(particleProgram, 'u_center'),
+        u_screenSize: gl.getUniformLocation(particleProgram, 'u_screenSize'),
+        u_opacity: gl.getUniformLocation(particleProgram, 'u_opacity'),
+        u_speedFactor: gl.getUniformLocation(particleProgram, 'u_speedFactor'),
+        u_trafficType: gl.getUniformLocation(particleProgram, 'u_trafficType'),
+        u_scaleByZoom: gl.getUniformLocation(particleProgram, 'u_scaleByZoom'),
+        u_particleSize: gl.getUniformLocation(particleProgram, 'u_particleSize'),
+        u_pathWidth: gl.getUniformLocation(particleProgram, 'u_pathWidth'),
+      };
+    }
+  }
+}
+
+// --- Route Generation ---
+function generateAllRoutes() {
+  if (nodes.length < 2) return;
+  allRoutes = [];
+
+  const hsDirIndices = nodes.map((n, i) => n.isHSDir ? i : -1).filter(i => i !== -1);
+  const weights = nodes.map(n => Math.sqrt(n.bandwidth + 0.1));
+  const totalWeight = weights.reduce((s, w) => s + w, 0);
+
+  let cum = 0;
+  const cumWeights = weights.map(w => (cum += w) / totalWeight);
+
+  const selectNode = (): number => {
+    const r = Math.random();
+    let lo = 0, hi = cumWeights.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cumWeights[mid] < r) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  let attempts = 0;
+  const maxAttempts = MAX_ROUTES * 10;
+
+  while (allRoutes.length < MAX_ROUTES && attempts < maxAttempts) {
+    attempts++;
+    const isHidden = Math.random() < currentHiddenProbability;
+    let srcIdx: number, tgtIdx: number;
+
+    if (isHidden && hsDirIndices.length >= 2) {
+      srcIdx = hsDirIndices[(Math.random() * hsDirIndices.length) | 0];
+      tgtIdx = hsDirIndices[(Math.random() * hsDirIndices.length) | 0];
+    } else {
+      srcIdx = selectNode();
+      tgtIdx = selectNode();
+    }
+
+    if (srcIdx === tgtIdx) continue;
+
+    const src = nodes[srcIdx], tgt = nodes[tgtIdx];
+    let endX = tgt.x;
+    const diff = endX - src.x;
+    if (diff > TILE_SIZE / 2) endX -= TILE_SIZE;
+    else if (diff < -TILE_SIZE / 2) endX += TILE_SIZE;
+
+    allRoutes.push({
+      startX: src.x, startY: src.y, endX, endY: tgt.y,
+      srcIdx, tgtIdx,
+      isHidden, bandwidthScore: src.bandwidth * tgt.bandwidth, bandwidthRank: 0
+    });
+  }
+
+  allRoutes.sort((a, b) => b.bandwidthScore - a.bandwidthScore);
+  const len = allRoutes.length - 1 || 1;
+  for (let i = 0; i < allRoutes.length; i++) allRoutes[i].bandwidthRank = i / len;
+}
+
+function filterRoutesByDensity() {
+  if (!allRoutes.length) {
+    self.postMessage({ type: 'visibleNodes', indices: [] });
+    return;
+  }
+  routes = allRoutes.slice(0, Math.max(1, (allRoutes.length * currentDensity) | 0));
+
+  // Collect unique node indices and send to main thread
+  const seen = new Set<number>();
+  const mapping = aggregatedToRawIndices; // null in city mode
+  for (const r of routes) {
+    if (mapping) {
+      // Country mode: expand to original indices
+      for (const idx of mapping[r.srcIdx]) seen.add(idx);
+      for (const idx of mapping[r.tgtIdx]) seen.add(idx);
+    } else {
+      // City mode: direct indices
+      seen.add(r.srcIdx);
+      seen.add(r.tgtIdx);
+    }
+  }
+  self.postMessage({ type: 'visibleNodes', indices: [...seen] });
+}
+// --- Buffer Init ---
+function initLineBuffer() {
+  if (!gl || !lineProgram || !lineVAO || !routes.length) return;
+
+  const SEGMENTS_PER_LINE = 8;
+  let totalLines = 0;
+  for (const r of routes) totalLines += getTierForRank(r.bandwidthRank)[0] * SEGMENTS_PER_LINE;
+
+  // Buffer: startX, startY, endX, endY, type, t1, t2, offsetFactor
+  const data = new Float32Array(totalLines * 2 * 8);
+  let vi = 0;
+
+  for (const r of routes) {
+    const [lineCount] = getTierForRank(r.bandwidthRank);
+    const type = r.isHidden ? 1.0 : 0.0;
+
+    for (let i = 0; i < lineCount; i++) {
+      const offsetFactor = (i - (lineCount - 1) / 2);
+
+      for (let s = 0; s < SEGMENTS_PER_LINE; s++) {
+        const t1 = s / SEGMENTS_PER_LINE;
+        const t2 = (s + 1) / SEGMENTS_PER_LINE;
+
+        // Vertex 1 (Start of segment)
+        data[vi++] = r.startX; data[vi++] = r.startY;
+        data[vi++] = r.endX; data[vi++] = r.endY;
+        data[vi++] = type; data[vi++] = t1; data[vi++] = t2; data[vi++] = offsetFactor;
+
+        // Vertex 2 (End of segment)
+        data[vi++] = r.startX; data[vi++] = r.startY;
+        data[vi++] = r.endX; data[vi++] = r.endY;
+        data[vi++] = type; data[vi++] = t1; data[vi++] = t2; data[vi++] = offsetFactor;
+      }
+    }
+  }
+
+  lineVertexCount = totalLines * 2;
+  gl.bindVertexArray(lineVAO);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+  const stride = 32;
+  const attrs = ['a_start', 'a_end', 'a_type', 'a_t1', 'a_t2', 'a_offsetFactor'];
+  const sizes = [2, 2, 1, 1, 1, 1];
+  const offsets = [0, 8, 16, 20, 24, 28];
+
+  for (let i = 0; i < attrs.length; i++) {
+    const loc = gl.getAttribLocation(lineProgram, attrs[i]);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, sizes[i], gl.FLOAT, false, stride, offsets[i]);
+  }
+  gl.bindVertexArray(null);
+}
+
+function initParticleBuffer() {
+  if (!gl || !particleProgram || !particleVAO || !routes.length) return;
+
+  let total = 0;
+  for (const r of routes) {
+    const [, pCount] = getTierForRank(r.bandwidthRank);
+    // Apply particleCount factor and optionally scale by bandwidth contribution (rank)
+    const baseCount = Math.max(1, Math.round(pCount * currentParticleCountFactor * 2));
+    const finalCount = currentScaleByBandwidth ? baseCount : Math.max(1, Math.round(currentParticleCountFactor * 3));
+    total += finalCount;
+  }
+
+  const data = new Float32Array(total * 9); // Added offsetDir
+  let vi = 0;
+
+  for (const r of routes) {
+    const [, pCount] = getTierForRank(r.bandwidthRank);
+    const baseCount = Math.max(1, Math.round(pCount * currentParticleCountFactor * 2));
+    const finalCount = currentScaleByBandwidth ? baseCount : Math.max(1, Math.round(currentParticleCountFactor * 3));
+    const type = r.isHidden ? 1.0 : 0.0;
+
+    for (let p = 0; p < finalCount; p++) {
+      data[vi++] = r.startX; data[vi++] = r.startY;
+      data[vi++] = r.endX; data[vi++] = r.endY;
+      data[vi++] = 0.12; // Fixed base speed
+      data[vi++] = Math.random(); // Random start time offset
+      data[vi++] = type;
+      data[vi++] = r.bandwidthRank;
+      data[vi++] = (Math.random() * 2.0 - 1.0); // a_offsetDir
+    }
+  }
+
+  particleCount = total;
+  gl.bindVertexArray(particleVAO);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+  const stride = 36;
+  const attrs = ['a_start', 'a_end', 'a_speed', 'a_timeOffset', 'a_type', 'a_bandwidthRank', 'a_offsetDir'];
+  const sizes = [2, 2, 1, 1, 1, 1, 1];
+  const offsets = [0, 8, 16, 20, 24, 28, 32];
+
+  for (let i = 0; i < attrs.length; i++) {
+    const loc = gl.getAttribLocation(particleProgram, attrs[i]);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, sizes[i], gl.FLOAT, false, stride, offsets[i]);
+  }
+  gl.bindVertexArray(null);
+}
+
+function rebuildBuffers() {
+  generateAllRoutes();
+  filterRoutesByDensity();
+  initLineBuffer();
+  initParticleBuffer();
+}
+
+function rebuildBuffersForDensity() {
+  filterRoutesByDensity();
+  initLineBuffer();
+  initParticleBuffer();
+}
+
+// --- Animation ---
+function animate(now: number) {
+  if (!gl || !lineProgram || !particleProgram) {
+    requestAnimationFrame(animate);
+    return;
+  }
+
+  if (!startTime) startTime = now;
+  const t = (now - startTime) / 1000;
+  const scale = Math.pow(2, currentViewState.zoom);
+  const [cx, cy] = projectToWorld(currentViewState.longitude, currentViewState.latitude);
+  const traffic = currentTrafficType === 'general' ? 1 : currentTrafficType === 'hidden' ? 2 : 0;
+
+  gl.viewport(0, 0, currentViewState.width * devicePixelRatio, currentViewState.height * devicePixelRatio);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  // Lines
+  if (lineVertexCount > 0) {
+    gl.useProgram(lineProgram);
+    gl.bindVertexArray(lineVAO);
+    gl.uniform1f(lineUniforms.u_scale, scale);
+    gl.uniform2f(lineUniforms.u_center, cx, cy);
+    gl.uniform2f(lineUniforms.u_screenSize, currentViewState.width, currentViewState.height);
+    gl.uniform1f(lineUniforms.u_opacity, currentOpacity);
+    gl.uniform1i(lineUniforms.u_trafficType, traffic);
+    gl.uniform1f(lineUniforms.u_pathWidth, currentPathWidth);
+    gl.drawArrays(gl.LINES, 0, lineVertexCount);
+  }
+
+  // Particles
+  if (particleCount > 0) {
+    gl.useProgram(particleProgram);
+    gl.bindVertexArray(particleVAO);
+    gl.uniform1f(particleUniforms.u_time, t);
+    gl.uniform1f(particleUniforms.u_scale, scale);
+    gl.uniform2f(particleUniforms.u_center, cx, cy);
+    gl.uniform2f(particleUniforms.u_screenSize, currentViewState.width, currentViewState.height);
+    gl.uniform1f(particleUniforms.u_opacity, currentOpacity);
+    gl.uniform1f(particleUniforms.u_speedFactor, currentSpeedFactor);
+    gl.uniform1i(particleUniforms.u_trafficType, traffic);
+    gl.uniform1f(particleUniforms.u_scaleByZoom, currentScaleByZoom ? 1.0 : 0.0);
+    gl.uniform1f(particleUniforms.u_particleSize, currentParticleSize);
+    gl.uniform1f(particleUniforms.u_pathWidth, currentPathWidth);
+    gl.drawArrays(gl.POINTS, 0, particleCount);
+  }
+
+  requestAnimationFrame(animate);
+}
+
+// --- Node Processing ---
+function processNodes() {
+  if (currentPathMode === 'country') {
+    nodes = aggregateNodesByCountry();
+  } else {
+    // City mode: no mapping needed, indices match directly
+    aggregatedToRawIndices = null;
+    nodes = rawNodes.map(n => {
+      const [x, y] = projectToWorld(n.lng, n.lat);
+      return { x, y, isHSDir: n.isHSDir, bandwidth: n.bandwidth };
+    });
+  }
+  rebuildBuffers();
+}
+
+// --- Message Handler ---
+self.onmessage = (e: MessageEvent<WorkerMessage>) => {
+  const msg = e.data;
+
+  if (msg.type === 'init' && msg.canvas) {
+    canvas = msg.canvas;
+    devicePixelRatio = msg.pixelRatio || 1;
+    if (msg.countryCentroids) countryCentroids = msg.countryCentroids;
+    initWebGL();
+    requestAnimationFrame(animate);
+  }
+
+  if (msg.type === 'updateNodes' && msg.nodes) {
+    // Store raw nodes for mode switching
+    rawNodes = msg.nodes.map(n => ({
+      lng: n.lng, lat: n.lat,
+      isHSDir: !!n.isHSDir,
+      bandwidth: n.selectionWeight ?? 0
+    }));
+    processNodes();
+  }
+
+  if (msg.type === 'updateViewState' && msg.viewState) {
+    currentViewState = { ...currentViewState, ...msg.viewState };
+  }
+
+  if (msg.type === 'resize' && msg.width && msg.height) {
+    currentViewState.width = msg.width;
+    currentViewState.height = msg.height;
+    if (canvas) {
+      canvas.width = msg.width * devicePixelRatio;
+      canvas.height = msg.height * devicePixelRatio;
+    }
+  }
+
+  if (msg.type === 'updateSettings') {
+    const densityChanged = msg.density !== undefined && msg.density !== currentDensity;
+    const pathModeChanged = msg.pathMode !== undefined && msg.pathMode !== currentPathMode;
+    const hiddenProbChanged = msg.hiddenServiceProbability !== undefined &&
+      msg.hiddenServiceProbability !== currentHiddenProbability;
+
+    if (msg.density !== undefined) currentDensity = msg.density;
+    if (msg.opacity !== undefined) currentOpacity = msg.opacity;
+    if (msg.speed !== undefined) currentSpeedFactor = msg.speed;
+    if (msg.trafficType !== undefined) currentTrafficType = msg.trafficType;
+    if (msg.pathMode !== undefined) currentPathMode = msg.pathMode;
+    if (msg.hiddenServiceProbability !== undefined) currentHiddenProbability = msg.hiddenServiceProbability;
+
+    // New TorFlow settings
+    const widthChanged = msg.pathWidth !== undefined && msg.pathWidth !== currentPathWidth;
+
+    if (msg.pathWidth !== undefined) currentPathWidth = msg.pathWidth;
+    if (msg.particleCount !== undefined) currentParticleCountFactor = msg.particleCount;
+    if (msg.scaleByZoom !== undefined) currentScaleByZoom = msg.scaleByZoom;
+    if (msg.scaleByBandwidth !== undefined) currentScaleByBandwidth = msg.scaleByBandwidth;
+    if (msg.particleSize !== undefined) currentParticleSize = msg.particleSize;
+
+    if (widthChanged) {
+      console.log(`[ParticleWorker] Path width updated to: ${currentPathWidth}`);
+    }
+
+    // Path mode or hidden probability change requires full rebuild
+    if ((pathModeChanged || hiddenProbChanged) && rawNodes.length) {
+      processNodes();
+    } else if (densityChanged && allRoutes.length) {
+      rebuildBuffersForDensity();
+    } else {
+      // For width, count factor, bandwidth scaling, just rebuild existing route buffers
+      // pathWidth is a uniform, so it doesn't need buffer rebuild, but others do.
+      const needsBufferRebuild = (msg.particleCount !== undefined) ||
+        (msg.scaleByBandwidth !== undefined);
+
+      if (needsBufferRebuild) {
+        initLineBuffer();
+        initParticleBuffer();
+      }
+    }
+  }
+};

@@ -1,0 +1,85 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="About RouteFluxMap">
+  <main class="min-h-screen bg-gradient-to-b from-tor-darker to-tor-dark">
+    <!-- Header -->
+    <header class="border-b border-white/10">
+      <div class="max-w-4xl mx-auto px-6 py-8">
+        <a href="/" class="inline-flex items-center gap-2 text-gray-400 hover:text-white transition-colors mb-6">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          </svg>
+          Back to visualization
+        </a>
+        <h1 class="text-4xl font-bold text-white flex items-center gap-3">
+          <svg class="w-10 h-10" viewBox="0 0 32 32" fill="none">
+            <circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2" class="text-tor-purple"/>
+            <circle cx="16" cy="16" r="8" stroke="currentColor" stroke-width="2" class="text-tor-blue"/>
+            <circle cx="16" cy="16" r="3" fill="currentColor" class="text-tor-blue"/>
+          </svg>
+          About RouteFluxMap
+        </h1>
+      </div>
+    </header>
+
+    <!-- Content -->
+    <div class="max-w-4xl mx-auto px-6 py-12">
+      <!-- Introduction -->
+      <section class="mb-16">
+        <h2 class="text-2xl font-semibold text-white mb-6">Tor Network Visualization</h2>
+        <div class="prose prose-invert prose-lg">
+          <p class="text-gray-300 leading-relaxed mb-4">
+            This visualization shows relay activity across the Tor network, updated hourly from official Tor Project data.
+          </p>
+          <ul class="text-gray-300 space-y-2 list-disc list-inside">
+            <li>Each <strong class="text-white">circle</strong> represents relay servers grouped by location. Click to see bandwidth and relay details.</li>
+            <li>Each <strong class="text-white">colored country</strong> shows top client connection sources.</li>
+            <li>Use the <strong class="text-white">date slider</strong> to explore historical data.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- Technology -->
+      <section class="mb-16">
+        <h2 class="text-2xl font-semibold text-white mb-6">Technology</h2>
+        <div class="grid md:grid-cols-2 gap-6">
+          <div class="bg-white/10 rounded-lg p-6 border border-white/20">
+            <h3 class="text-lg font-medium text-white mb-3">Frontend</h3>
+            <ul class="text-gray-200 space-y-1 text-sm">
+              <li>• Astro (Static Site Generator)</li>
+              <li>• React (Interactive Components)</li>
+              <li>• Deck.gl (WebGL Visualization)</li>
+              <li>• MapLibre GL (Vector Maps)</li>
+              <li>• Tailwind CSS (Styling)</li>
+            </ul>
+          </div>
+          <div class="bg-white/10 rounded-lg p-6 border border-white/20">
+            <h3 class="text-lg font-medium text-white mb-3">Infrastructure</h3>
+            <ul class="text-gray-200 space-y-1 text-sm">
+              <li>• Cloudflare Pages (Hosting)</li>
+              <li>• Cloud Storage (R2 / DO Spaces)</li>
+              <li>• Local Cron (Data Pipeline)</li>
+              <li>• MaxMind GeoIP (Geolocation)</li>
+              <li>• Tor Onionoo API (Data Source)</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Footer -->
+    <footer class="border-t border-white/10 mt-16">
+      <div class="max-w-4xl mx-auto px-6 py-8 text-center text-gray-500 text-sm">
+        <p>RouteFluxMap is not affiliated with The Tor Project.</p>
+      </div>
+    </footer>
+  </main>
+</Layout>
+
+<style>
+  html, body {
+    overflow: auto !important;
+  }
+</style>
