@@ -32,6 +32,8 @@ export interface CreateRelayLayerOptions {
   onHover?: (info: PickingInfo) => void;
   /** Currently selected hour (0-23) */
   currentHour?: number;
+  /** Whether uptime diagnostic mode is active */
+  uptimeMode?: boolean;
 }
 
 /**
@@ -48,6 +50,7 @@ export function createRelayLayer(options: CreateRelayLayerOptions): ScatterplotL
     onClick,
     onHover,
     currentHour = 12,
+    uptimeMode = false,
   } = options;
 
   if (!visible || nodes.length === 0) {
@@ -77,7 +80,14 @@ export function createRelayLayer(options: CreateRelayLayerOptions): ScatterplotL
       });
 
       if (!anyActive) {
-        return [100, 100, 100, 200]; // Gray color for "Down" nodes
+        // In uptime mode, inactive nodes are green (as requested for high visibility)
+        // In standard mode, they are a subtle gray
+        return uptimeMode ? [0, 255, 0, 200] : [100, 100, 100, 150];
+      }
+
+      // If uptime mode is on, active nodes are violet/purple
+      if (uptimeMode) {
+        return [139, 92, 246, 220]; // Violet/Purple (config.relayColors.hidden)
       }
 
       // Color by majority relay type at this location
@@ -95,7 +105,7 @@ export function createRelayLayer(options: CreateRelayLayerOptions): ScatterplotL
     onClick,
     onHover,
     updateTriggers: {
-      getFillColor: [nodes, currentHour],
+      getFillColor: [nodes, currentHour, uptimeMode],
       getRadius: [nodes, sizeScale, scaleByBandwidth],
       opacity: [opacity],
       getLineColor: [opacity],

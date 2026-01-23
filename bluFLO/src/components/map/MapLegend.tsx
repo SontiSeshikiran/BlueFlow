@@ -15,6 +15,8 @@ export interface MapLegendProps {
   isMobile: boolean;
   /** Date index for last updated info */
   dateIndex: DateIndex | null;
+  /** Whether uptime diagnostic mode is active */
+  uptimeMode?: boolean;
 }
 
 const RELAY_TYPES = [
@@ -22,10 +24,10 @@ const RELAY_TYPES = [
   { key: 'guard' as const, label: 'Guard', desc: 'entry point', extraClass: '' },
   { key: 'middle' as const, label: 'Middle', desc: 'intermediate', extraClass: '' },
   { key: 'hidden' as const, label: 'HSDir', desc: 'hidden services', extraClass: 'mt-1' },
-  { key: 'inactive' as const, label: 'Inactive', desc: 'hour offline', extraClass: 'mt-1 text-gray-500' },
+  { key: 'inactive' as const, label: 'Inactive', desc: 'hour offline', extraClass: 'mt-1 text-gray-400' },
 ];
 
-export default function MapLegend({ isMobile, dateIndex }: MapLegendProps) {
+export default function MapLegend({ isMobile, dateIndex, uptimeMode }: MapLegendProps) {
   const [legendExpanded, setLegendExpanded] = useState(false);
 
   return (
@@ -89,9 +91,11 @@ export default function MapLegend({ isMobile, dateIndex }: MapLegendProps) {
                 <span
                   className="w-2 h-2 rounded-full"
                   style={{
-                    backgroundColor: key === 'inactive'
-                      ? 'rgb(100, 100, 100)'
-                      : `rgb(${config.relayColors[key].slice(0, 3).join(',')})`,
+                    backgroundColor: uptimeMode
+                      ? (key === 'inactive' ? 'rgb(0, 255, 0)' : 'rgb(139, 92, 246)')
+                      : (key === 'inactive'
+                        ? 'rgb(100, 100, 100)'
+                        : `rgb(${config.relayColors[key].slice(0, 3).join(',')})`),
                   }}
                 />
                 <span className="text-gray-400">{label}</span>

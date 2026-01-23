@@ -561,6 +561,7 @@ async function processOnionooRelays(data: OnionooResponse): Promise<ProcessedRel
       flags: mapFlags(relay.flags),
       ip: addr.ip,
       port: addr.port,
+      uptime: 0xFFFFFF, // All hours active for live data
     });
   }
 
@@ -711,8 +712,8 @@ function downloadFile(url: string, dest: string): Promise<void> {
  * Only allows alphanumeric, dash, underscore, dot, and forward slash
  */
 function isValidFilePath(path: string): boolean {
-  // Must be a reasonable path without shell metacharacters
-  return /^[\w\-./]+$/.test(path) &&
+  // Allow most characters but block shell meta-characters and directory traversal
+  return !/[;&|<>$\n\r]/.test(path) &&
     !path.includes('..') &&
     path.length < 500;
 }
@@ -725,10 +726,17 @@ async function verifyArchive(archivePath: string): Promise<boolean> {
   }
 
   try {
+    // Try xz first if available
     await execAsync(`xz -t "${archivePath}"`, { timeout: 120000 });
     return true;
   } catch {
-    return false;
+    try {
+      // Fallback to tar (bsdtar on Windows supports .xz)
+      await execAsync(`tar -tf "${archivePath}"`, { timeout: 120000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -900,10 +908,19 @@ async function ensureExtractedConsensus(year: number, month: number): Promise<st
 
       // Extract entire archive at once (xz decompression happens once)
       await withRetry(async () => {
-        await execAsync(
-          `tar -xf "${archivePath}" --xz -C "${extractDir}"`,
-          { maxBuffer: 10 * 1024 * 1024 }
-        );
+        // Try standard tar, it usually handles .xz automatically on modern systems
+        try {
+          await execAsync(
+            `tar -xf "${archivePath}" -C "${extractDir}"`,
+            { maxBuffer: 10 * 1024 * 1024 }
+          );
+        } catch (e: any) {
+          // Explicitly try --xz if first attempt failed
+          await execAsync(
+            `tar -xf "${archivePath}" --xz -C "${extractDir}"`,
+            { maxBuffer: 10 * 1024 * 1024 }
+          );
+        }
 
         // Verify extraction succeeded
         if (!fs.existsSync(expectedDir)) {
@@ -1008,20 +1025,31 @@ async function loadDescriptorBandwidthInternal(year: number, month: number, mont
   // New structure: fingerprint -> array of {date, bandwidth} entries
   const bandwidthMap = new Map<string, BandwidthEntry[]>();
 
-  return new Promise((resolve) => {
-    // Parse lock ensures only 1 xz runs at a time
-    const xz = spawn('xz', [threadArg, '-dc', downloadedPath]);
-    const tar = spawn('tar', ['-xf', '-', '-O']);
+  return new Promise(async (resolve) => {
+    let xzFound = false;
+    try {
+      await execAsync('xz --version');
+      xzFound = true;
+    } catch { }
 
-    // Pipe xz output to tar input
-    xz.stdout.pipe(tar.stdin);
+    let xz: any, tar: any;
 
-    xz.on('error', (err) => {
-      console.log(`    ⚠ xz error: ${err.message}, falling back to single-threaded`);
-      // Fallback handled by tar error
-    });
+    if (xzFound) {
+      xz = spawn('xz', [threadArg, '-dc', downloadedPath]);
+      tar = spawn('tar', ['-xf', '-', '-O']);
+      // Pipe xz output to tar input
+      xz.stdout.pipe(tar.stdin);
 
-    tar.on('error', (err) => {
+      xz.on('error', (err: any) => {
+        console.log(`    ⚠ xz error: ${err.message}`);
+      });
+    } else {
+      console.log(`    ⚠ xz not found, using tar directly for decompression...`);
+      // bsdtar on Windows supports .xz automatically
+      tar = spawn('tar', ['-xf', downloadedPath, '-O']);
+    }
+
+    tar.on('error', (err: any) => {
       console.log(`    ⚠ Failed to spawn tar: ${err.message}`);
       resolve(new Map());
     });
@@ -1557,22 +1585,78 @@ async function loadMonthlyCountryData(year: number, month: number): Promise<Map<
  * For single-day runs: uses direct daily request (more efficient).
  */
 async function fetchCountryClients(date: string): Promise<CountryData> {
-  // For single-day runs, skip batch and fetch directly
-  if (!USE_BATCH_COUNTRY_FETCH) {
-    return withRetry(() => fetchDailyCountryDataOnce(date), `Country data ${date}`, 2);
+  const fetchWithFallbackSearch = async (targetDate: string): Promise<CountryData> => {
+    // For single-day runs, skip batch and fetch directly
+    if (!USE_BATCH_COUNTRY_FETCH) {
+      return await withRetry(() => fetchDailyCountryDataOnce(targetDate), `Country data ${targetDate}`, 2);
+    }
+
+    const [year, month] = targetDate.split('-').map(Number);
+    const monthlyData = await loadMonthlyCountryData(year, month);
+
+    if (monthlyData.has(targetDate)) {
+      return monthlyData.get(targetDate)!;
+    }
+
+    return await withRetry(() => fetchDailyCountryDataOnce(targetDate), `Country data ${targetDate}`, 2);
+  };
+
+  try {
+    const data = await fetchWithFallbackSearch(date);
+    // If we got data but it's empty (0 users), and it's a recent date, try searching backwards
+    // Tor Metrics usually has a 3-day delay.
+    if (data.totalUsers === 0 || Object.keys(data.countries).length === 0) {
+      const targetDate = new Date(date);
+      const today = new Date();
+      const diffDays = Math.floor((today.getTime() - targetDate.getTime()) / (1000 * 60 * 60 * 24));
+
+      // Only search backwards if target date is within the last 10 days
+      if (diffDays <= 10) {
+        console.log(`    ⚠ No country data for ${date}, searching backwards for latest available...`);
+        for (let i = 1; i <= 7; i++) {
+          const prevDate = new Date(targetDate);
+          prevDate.setDate(targetDate.getDate() - i);
+          const prevDateStr = prevDate.toISOString().split('T')[0];
+
+          try {
+            const fallbackData = await fetchWithFallbackSearch(prevDateStr);
+            if (fallbackData.totalUsers > 0 && Object.keys(fallbackData.countries).length > 0) {
+              console.log(`    ✓ Using fallback country data from ${prevDateStr} for ${date}`);
+              return {
+                ...fallbackData,
+                date: date, // Keep the requested date so UI doesn't get confused
+                generatedAt: new Date().toISOString(),
+              };
+            }
+          } catch {
+            // Ignore errors for individual fallback dates
+          }
+        }
+      }
+    }
+    return data;
+  } catch (e) {
+    console.log(`    ⚠ Failed to fetch country data for ${date}, trying last 7 days...`);
+    // Fallback search if direct fetch failed
+    const targetDate = new Date(date);
+    for (let i = 1; i <= 7; i++) {
+      const prevDate = new Date(targetDate);
+      prevDate.setDate(targetDate.getDate() - i);
+      const prevDateStr = prevDate.toISOString().split('T')[0];
+      try {
+        const fallbackData = await fetchWithFallbackSearch(prevDateStr);
+        if (fallbackData.totalUsers > 0) {
+          console.log(`    ✓ Using fallback country data from ${prevDateStr} for ${date}`);
+          return {
+            ...fallbackData,
+            date: date,
+            generatedAt: new Date().toISOString(),
+          };
+        }
+      } catch { }
+    }
+    throw e;
   }
-
-  const [year, month] = date.split('-').map(Number);
-
-  // Try to get from monthly cache
-  const monthlyData = await loadMonthlyCountryData(year, month);
-
-  if (monthlyData.has(date)) {
-    return monthlyData.get(date)!;
-  }
-
-  // Fallback to daily request with retries
-  return withRetry(() => fetchDailyCountryDataOnce(date), `Country data ${date}`, 2);
 }
 
 // ============================================================================

@@ -9,7 +9,7 @@
 export const config = {
   // Site info - configure via environment variables
   siteUrl: import.meta.env.PUBLIC_SITE_URL || '',
-  metricsUrl: import.meta.env.PUBLIC_METRICS_URL || '',
+  metricsUrl: import.meta.env.PUBLIC_METRICS_URL || 'https://metrics.torproject.org/rs.html',
   dataBaseUrl: import.meta.env.PUBLIC_DATA_URL || '',
 
   // UI Defaults (Sliders 0-1)
@@ -169,10 +169,10 @@ export function getRelayMetricsUrl(fingerprint: string): string {
   if (!FINGERPRINT_VALID_REGEX.test(cleanFingerprint)) {
     console.warn(`Invalid fingerprint format: ${fingerprint}`);
     // Return safe fallback URL - metrics site will show "not found"
-    return `${config.metricsUrl}/relay/0000000000000000000000000000000000000000`;
+    return `${config.metricsUrl}#details/0000000000000000000000000000000000000000`;
   }
 
-  return `${config.metricsUrl}/relay/${cleanFingerprint}`;
+  return `${config.metricsUrl}#details/${cleanFingerprint}`;
 }
 
 // Helper to build metrics country URL
@@ -181,9 +181,9 @@ export function getCountryMetricsUrl(countryCode: string): string {
   const cleaned = countryCode.replace(COUNTRY_CODE_CLEAN_REGEX, '').toUpperCase();
   if (cleaned.length !== 2) {
     console.warn(`Invalid country code: ${countryCode}`);
-    return `${config.metricsUrl}/country/`;
+    return `${config.metricsUrl}#search/`;
   }
-  return `${config.metricsUrl}/country/${cleaned}/`;
+  return `${config.metricsUrl}#search/country:${cleaned}`;
 }
 
 export type Config = typeof config;

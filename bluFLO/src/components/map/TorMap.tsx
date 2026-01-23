@@ -135,12 +135,27 @@ export default function TorMap() {
 
   // Hourly tracking
   const [currentHour, setCurrentHour] = useState(12);
+  const [uptimeMode, setUptimeMode] = useState(false);
 
   // Build search index from relay data (shared between RelaySearch and URL deep linking)
   const searchIndex = useMemo(
     () => buildSearchIndex(relayData?.nodes ?? []),
     [relayData?.nodes]
   );
+
+  // Calculate hourly relay count for the dashboard
+  const hourlyRelayCount = useMemo(() => {
+    if (!relayData?.nodes) return 0;
+    let count = 0;
+    for (const node of relayData.nodes) {
+      for (const r of node.relays) {
+        if (r.uptime === undefined || (r.uptime & (1 << currentHour)) !== 0) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }, [relayData, currentHour]);
 
   // Track window size for particle canvas
   useEffect(() => {
@@ -502,6 +517,7 @@ export default function TorMap() {
       onClick: handleRelayClick,
       onHover: relaySelection.handleHover,
       currentHour,
+      uptimeMode,
     });
     if (relayLayer) result.push(relayLayer);
 
@@ -517,13 +533,16 @@ export default function TorMap() {
     countryGeojson,
     visibility,
     countryOpacity,
+    showTopConnections,
     topCountryCount,
     filteredNodes,
     relayOpacity,
     particleSettings.relaySize,
+    particleSettings.scaleNodesByBandwidth,
     handleRelayClick,
     relaySelection,
     currentHour,
+    uptimeMode,
   ]);
 
   // === RENDER ===
@@ -569,9 +588,10 @@ export default function TorMap() {
           controller={true}
           layers={layers}
           onClick={relaySelection.handleDeckClick}
-          getCursor={() =>
-            relaySelection.hoverInfo || countryHover.hoverInfo.current ? 'pointer' : 'grab'
-          }
+          getCursor={({ isDragging }) => {
+            if (isDragging) return 'grabbing';
+            return relaySelection.hoverInfo || countryHover.isHovering ? 'pointer' : 'grab';
+          }}
           style={{ position: 'relative' }}
         >
           <Map mapStyle={config.mapStyle} attributionControl={false} onLoad={() => setMapLoaded(true)} />
@@ -688,6 +708,8 @@ export default function TorMap() {
             searchIndex={searchIndex}
             onSelectRelay={focusRelay}
             searchDisabled={!hasRelayNodes || loading}
+            uptimeMode={uptimeMode}
+            onToggleUptimeMode={() => setUptimeMode(!uptimeMode)}
           />
 
           {/* Relay Search - Desktop only (mobile search is in MapHeader) */}
@@ -701,7 +723,7 @@ export default function TorMap() {
             </div>
           )}
 
-          <MapLegend isMobile={isMobile} dateIndex={dateIndex} />
+          <MapLegend isMobile={isMobile} dateIndex={dateIndex} uptimeMode={uptimeMode} />
 
           {/* Date controls */}
           <div
@@ -726,7 +748,7 @@ export default function TorMap() {
                   onHourChange={setCurrentHour}
                   playbackSpeed={playback.playbackSpeed}
                   onPlaybackSpeedChange={playback.setPlaybackSpeed}
-                  relayCount={relayStats.relayCount}
+                  relayCount={hourlyRelayCount}
                   locationCount={relayStats.locationCount}
                   isPlaying={playback.isPlaying}
                   onPlayingChange={playback.setIsPlaying}

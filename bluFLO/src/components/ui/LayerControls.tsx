@@ -12,6 +12,8 @@ interface LayerControlsProps {
   showParticles?: boolean; // Only show particle toggle when implemented
   compact?: boolean; // Render without container (for embedding in other components)
   horizontal?: boolean; // Render toggles in a horizontal row (for mobile header)
+  uptimeMode?: boolean;
+  onToggleUptimeMode?: () => void;
 }
 
 interface ToggleProps {
@@ -39,8 +41,8 @@ function Toggle({ label, icon, checked, onChange, color = '#00b4ff', small = fal
         <div className={`rounded-full transition-colors duration-200 ${checked ? 'bg-tor-green/30' : 'bg-gray-700'} ${small ? 'w-7 h-3.5' : 'w-10 h-5'}`} />
         <div
           className={`absolute top-0.5 left-0.5 rounded-full transition-all duration-200 shadow-md ${small
-              ? `w-2.5 h-2.5 ${checked ? 'translate-x-3.5' : 'translate-x-0'}`
-              : `w-4 h-4 ${checked ? 'translate-x-5' : 'translate-x-0'}`
+            ? `w-2.5 h-2.5 ${checked ? 'translate-x-3.5' : 'translate-x-0'}`
+            : `w-4 h-4 ${checked ? 'translate-x-5' : 'translate-x-0'}`
             }`}
           style={{ backgroundColor: checked ? color : '#666' }}
         />
@@ -59,6 +61,8 @@ export default function LayerControls({
   showParticles = false,
   compact = false,
   horizontal = false,
+  uptimeMode = false,
+  onToggleUptimeMode,
 }: LayerControlsProps) {
   const [isExpanded, setIsExpanded] = useState(true);
 
@@ -93,6 +97,15 @@ export default function LayerControls({
             icon={!horizontal ? <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="18" cy="18" r="2" /><circle cx="18" cy="6" r="1.5" /><circle cx="6" cy="18" r="1.5" /></svg> : undefined}
             checked={visibility.particles}
             onChange={() => handleToggle('particles')}
+            small={horizontal}
+          />
+        )}
+        {onToggleUptimeMode && (
+          <Toggle
+            label="Uptime Mode"
+            icon={!horizontal ? <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg> : undefined}
+            checked={uptimeMode}
+            onChange={onToggleUptimeMode}
             small={horizontal}
           />
         )}
@@ -160,6 +173,14 @@ export default function LayerControls({
               onChange={() => handleToggle('particles')}
             />
           )}
+          {onToggleUptimeMode && (
+            <Toggle
+              label="Uptime Mode"
+              icon={<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>}
+              checked={uptimeMode}
+              onChange={onToggleUptimeMode}
+            />
+          )}
         </div>
       </div>
 
@@ -182,6 +203,12 @@ export default function LayerControls({
             <div
               className={`w-2 h-2 rounded-full ${visibility.particles ? 'bg-tor-green' : 'bg-gray-600'}`}
               title="Traffic Flow"
+            />
+          )}
+          {uptimeMode && (
+            <div
+              className="w-2 h-2 rounded-full bg-[#22c55e]"
+              title="Uptime Mode"
             />
           )}
         </div>

@@ -23,6 +23,10 @@ export interface MapHeaderProps {
   onSelectRelay?: (nodeIndex: number, relayIndex: number, fingerprint: string) => void;
   /** Whether search is disabled (mobile only) */
   searchDisabled?: boolean;
+  /** Whether uptime diagnostic mode is active */
+  uptimeMode?: boolean;
+  /** Toggle uptime diagnostic mode */
+  onToggleUptimeMode?: () => void;
 }
 
 const Logo = ({ className }: { className?: string }) => (
@@ -32,14 +36,15 @@ const Logo = ({ className }: { className?: string }) => (
     <circle cx="16" cy="16" r="3" fill="currentColor" className="text-tor-green" />
   </svg>
 );
-
-export default function MapHeader({ 
-  visibility, 
+export default function MapHeader({
+  visibility,
   onVisibilityChange,
   isMobile = false,
   searchIndex = [],
   onSelectRelay,
   searchDisabled = false,
+  uptimeMode = false,
+  onToggleUptimeMode,
 }: MapHeaderProps) {
   return (
     <div className={`absolute top-4 z-10 ${isMobile ? 'left-4 right-4' : 'left-4'}`}>
@@ -51,7 +56,7 @@ export default function MapHeader({
             <div className="flex-1">
               <RelaySearch
                 searchIndex={searchIndex}
-                onSelectRelay={onSelectRelay ?? (() => {})}
+                onSelectRelay={onSelectRelay ?? (() => { })}
                 disabled={searchDisabled}
               />
             </div>
@@ -72,6 +77,8 @@ export default function MapHeader({
           showParticles={true}
           compact={true}
           horizontal={isMobile}
+          uptimeMode={uptimeMode}
+          onToggleUptimeMode={onToggleUptimeMode}
         />
       </div>
     </div>

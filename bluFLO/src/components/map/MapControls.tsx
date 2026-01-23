@@ -209,7 +209,8 @@ export default function MapControls({
           </button>
           <div className="text-center text-[9px] text-gray-500 mt-0.5">{zoom.toFixed(1)}x</div>
         </>
-      )}
+      )
+      }
 
       {/* Cinema Mode Toggle - always visible */}
       <button
@@ -245,19 +246,21 @@ export default function MapControls({
       </button>
 
       {/* Keyboard Shortcuts Help - hidden in cinema mode */}
-      {!cinemaMode && (
-        <button
-          onClick={onShowKeyboardHelp}
-          className={defaultButtonClass}
-          aria-label="Keyboard shortcuts"
-          title="Keyboard shortcuts (?)"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M6 5h12a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7a2 2 0 012-2zm1 4h2m2 0h2m2 0h2M7 12h2m2 0h2m2 0h2M8 15h8" />
-          </svg>
-        </button>
-      )}
-    </div>
+      {
+        !cinemaMode && (
+          <button
+            onClick={onShowKeyboardHelp}
+            className={defaultButtonClass}
+            aria-label="Keyboard shortcuts"
+            title="Keyboard shortcuts (?)"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M6 5h12a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7a2 2 0 012-2zm1 4h2m2 0h2m2 0h2M7 12h2m2 0h2m2 0h2M8 15h8" />
+            </svg>
+          </button>
+        )
+      }
+    </div >
   );
 }
 

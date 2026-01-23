@@ -130,8 +130,11 @@ export default function TopClientConnections({
                     </table>
                 ) : (
                     <div className="px-4 py-8 text-center">
-                        <div className="text-gray-500 text-xs italic mb-1">No data available</div>
-                        <div className="text-gray-600 text-[10px]">Try an earlier date</div>
+                        <div className="text-gray-500 text-xs italic mb-1">No connection data for this date</div>
+                        <div className="text-gray-600 text-[10px] leading-relaxed">
+                            Tor Metrics data has a ~3-day delay.<br />
+                            Try selecting an earlier date.
+                        </div>
                     </div>
                 )}
             </div>

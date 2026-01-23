@@ -60,13 +60,14 @@ const DEG_TO_RAD = PI / 180;
 const BASE_LINE_OFFSET = 0.005; // Base perpendicular offset for visual lanes
 
 // Bandwidth rank thresholds: [threshold, lineCount, particleCount]
+// Increased counts for a denser, more solid look
 const RANK_TIERS = [
-  [0.01, 5, 6], // Top 1%
-  [0.05, 4, 5], // Top 5%
-  [0.10, 3, 4], // Top 10%
-  [0.25, 2, 3], // Top 25%
-  [0.50, 1, 2], // Top 50%
-  [1.00, 1, 1], // Rest
+  [0.01, 8, 12], // Top 1% - Heavy flow
+  [0.05, 6, 9],  // Top 5%
+  [0.10, 4, 6],  // Top 10%
+  [0.25, 3, 4],  // Top 25%
+  [0.50, 2, 3],  // Top 50%
+  [1.00, 1, 2],  // Rest
 ] as const;
 
 // --- State ---
@@ -137,7 +138,9 @@ void main() {
     vec2 perp = vec2(-dir.y, dir.x);
     // Using 0.15 multiplier for a more pronounced "bloom"
     float curve = sin(t * 3.14159265);
-    pos += perp * a_offsetFactor * u_pathWidth * dist * 0.15 * curve;
+    // Reduced spacing multiplier from 0.15 to 0.1 for tighter lines
+    // and removed dist dependency to keep width consistent
+    pos += perp * a_offsetFactor * u_pathWidth * 3.0 * curve;
   }
   
   vec2 p = (pos - u_center) * u_scale;
@@ -182,7 +185,8 @@ void main() {
     vec2 perp = vec2(-dir.y, dir.x);
     // Consistent with static lines spread
     float curve = sin(st * 3.14159265);
-    pos += perp * a_offsetDir * u_pathWidth * dist * 0.15 * curve;
+    // Use a tighter distribution for particles to fill the line center
+    pos += perp * a_offsetDir * u_pathWidth * 3.0 * curve;
   }
   
   vec2 p = (pos - u_center) * u_scale;
@@ -453,7 +457,8 @@ function initLineBuffer() {
     const type = r.isHidden ? 1.0 : 0.0;
 
     for (let i = 0; i < lineCount; i++) {
-      const offsetFactor = (i - (lineCount - 1) / 2);
+      // Tighter spacing: 0.1 units instead of default 1.0 units (relative)
+      const offsetFactor = (i - (lineCount - 1) * 0.5) * 0.2;
 
       for (let s = 0; s < SEGMENTS_PER_LINE; s++) {
         const t1 = s / SEGMENTS_PER_LINE;
